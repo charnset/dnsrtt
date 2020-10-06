@@ -422,6 +422,7 @@ int main(int argc, char **argv)
 			break;
 		case 'd':
 			daemonize = true;
+			printf("Run the server as a daemon (please check /var/log/syslog for completion of the server)\n");
 			if (optarg) {
 				daemon_root = optarg;
 			}

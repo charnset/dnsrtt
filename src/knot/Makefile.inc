@@ -209,6 +209,7 @@ include $(srcdir)/knot/modules/noudp/Makefile.inc
 include $(srcdir)/knot/modules/onlinesign/Makefile.inc
 include $(srcdir)/knot/modules/queryacl/Makefile.inc
 include $(srcdir)/knot/modules/rrl/Makefile.inc
+include $(srcdir)/knot/modules/dnsrtt/Makefile.inc
 include $(srcdir)/knot/modules/stats/Makefile.inc
 include $(srcdir)/knot/modules/synthrecord/Makefile.inc
 include $(srcdir)/knot/modules/whoami/Makefile.inc
