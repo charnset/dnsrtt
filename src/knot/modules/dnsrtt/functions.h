@@ -26,7 +26,7 @@
 
 typedef struct {
 	uint64_t netblk;     // Prefix associated.
-	uint16_t ntok;       // Tokens available.
+	uint16_t ntcp;       // Number of TCP queries
 	uint32_t time;       // Timestamp.
 } dnsrtt_pref_item_t;
 

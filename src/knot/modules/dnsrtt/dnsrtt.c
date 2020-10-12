@@ -59,7 +59,7 @@ static knotd_state_t ratelimit_apply(knotd_state_t state, knot_pkt_t *pkt,
 		tcp = true;
 	}	
 
-	knotd_mod_log(mod, LOG_DEBUG, "Query flags: %d", qdata->params->flags);
+	// knotd_mod_log(mod, LOG_DEBUG, "Query flags: %d", qdata->params->flags);
 
 	dnsrtt_req_t req = {
 		.wire = pkt->wire,

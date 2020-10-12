@@ -57,6 +57,18 @@ static void subnet_tostr(char *dst, size_t maxlen, const struct sockaddr_storage
 	}
 }
 
+static void dnsrtt_lock(dnsrtt_pref_table_t *pref_tbl, int lk_id)
+{
+	assert(lk_id > -1);
+	pthread_mutex_lock(pref_tbl->lk + lk_id);
+}
+
+static void dnsrtt_unlock(dnsrtt_pref_table_t *pref_tbl, int lk_id)
+{
+	assert(lk_id > -1);
+	pthread_mutex_unlock(pref_tbl->lk + lk_id);
+}
+
 static int dnsrtt_pref_setlocks(dnsrtt_pref_table_t *pref_tbl, uint32_t granularity)
 {
 	assert(!pref_tbl->lk); /* Cannot change while locks are used. */
@@ -147,24 +159,24 @@ static dnsrtt_pref_item_t *dnsrtt_pref_id(dnsrtt_pref_table_t *tbl, const struct
 	
 	// find id
 	uint64_t id = netblk % tbl->size;
-	knotd_mod_log(mod, LOG_DEBUG, "pref (in network byteorder, adjust masks) %lld : id %lld", (long long)netblk, (long long)id);
+	// knotd_mod_log(mod, LOG_DEBUG, "pref (in network byteorder, adjust masks) %lld : id %lld", (long long)netblk, (long long)id);
 
 	// Lock for lookup
-	// pthread_mutex_lock(&tbl->ll);
+	pthread_mutex_lock(&tbl->ll);
 
 	// Assign granular lock and unlock lookup
-	// *lock = id % tbl->lk_count;
-	// dnsrtt_lock(tbl, *lock);
-	// pthread_mutex_unlock(&tbl->ll);
+	*lock = id % tbl->lk_count;
+	dnsrtt_lock(tbl, *lock);
+	pthread_mutex_unlock(&tbl->ll);
 
 	// Find bucket 
 	dnsrtt_pref_item_t *bucket = &tbl->arr[id];
 
 	// Check whether bucket is empty or not
-	if (!bucket->netblk && !bucket->ntok && !bucket->time) {
+	if (!bucket->netblk && !bucket->ntcp && !bucket->time) {
 		knotd_mod_log(mod, LOG_DEBUG, "Initiating an empty bucket...");
 		bucket->netblk = netblk;
-		bucket->ntok = tbl->rate;
+		bucket->ntcp = 0;
 		bucket->time = stamp;
 	}
 
@@ -180,52 +192,58 @@ int dnsrtt_pref_query(dnsrtt_pref_table_t *dnsrtt, int slip, const struct sockad
 
 	int ret = KNOT_EOK;
 
-	// Query detail
-	char addr_str[SOCKADDR_STRLEN];
-	subnet_tostr(addr_str, sizeof(addr_str), remote);
-	if (req->tcp) {	// Skip TCP query
-		knotd_mod_log(mod, LOG_DEBUG, "TCP query : IP %s", addr_str);
-		return ret;
-		
-	} else {
-		knotd_mod_log(mod, LOG_DEBUG, "UDP query : IP %s", addr_str);
-	}
-	
 	//  Fetch bucket
 	int lock = -1;
 	uint32_t now = time_now().tv_sec;
 	dnsrtt_pref_item_t *bucket = dnsrtt_pref_id(dnsrtt, remote, req, now, &lock, mod);
 	
 	if (!bucket) {
+		if (lock > -1) {
+			dnsrtt_unlock(dnsrtt, lock);
+		}
 		return KNOT_ERROR;
 	}
 
 	// Visit bucket
-	knotd_mod_log(mod, LOG_DEBUG, "Visiting a bucket...");
-	knotd_mod_log(mod, LOG_DEBUG, "pref %lld, ntok %lld, lastseen %lld", (long long)bucket->netblk, (long long)bucket->ntok, (long long)bucket->time);
+	// knotd_mod_log(mod, LOG_DEBUG, "Visiting a bucket...");
+	char addr_str[SOCKADDR_STRLEN];
+	subnet_tostr(addr_str, sizeof(addr_str), remote);
+	knotd_mod_log(mod, LOG_DEBUG, "IP %s, pref %lld, ntcp %lld, lastseen %lld", addr_str, (long long)bucket->netblk, (long long)bucket->ntcp, (long long)bucket->time);
 	
-	// Check number of tokens
-	// ntok > 0 means we will send back a truncated response of probability of 1/slip percent
-	// ntok = 0 means we will do nothing, unless lastseen is more than an hour we will do the same as ntok > 0
-	// ntok < 0 means something went wrong, report KNOT_ERROR
-	if (bucket->ntok > 0) {
-		knotd_mod_log(mod, LOG_DEBUG, "Replying back a truncated bit with the probablity of %.2f percent...", 100.00 * (1.0 / slip));
-		if (dnsrtt_slip_roll(slip)) {	// (1 / slip) percent of unfortunate query
-			--bucket->ntok; // update bucket ntok (decreasing)
-			bucket->time = now;	// update lastseen (upcoming TCP)
-			ret = KNOT_ELIMIT;
-		}
-	} else if (bucket->ntok == 0) {
-		if (now - bucket->time > 3600) {
-			knotd_mod_log(mod, LOG_DEBUG, "Replying back a truncated bit with the probablity of %.2f percent...", 100.00 * (1.0 / slip));
+	if (req->tcp) {	// TCP queries
+		// knotd_mod_log(mod, LOG_DEBUG, "========= TCP query =========");
+		++bucket->ntcp; // update bucket ntcp (increasing)
+		bucket->time = now; // update lastseen
+	} else { // UDP queries
+		// knotd_mod_log(mod, LOG_DEBUG, "========= UDP query =========");
+		// Check number of tcp queries
+		// ntcp < rate means we will send back a truncated response of probability of 1/slip percent
+		// ntcp >= rate  means we will do nothing, unless lastseen is more than an hour we will send back a truncated response and reset ntcp to 0
+		// ntcp < 0 means something went wrong, report KNOT_ERROR
+		if (bucket->ntcp < dnsrtt->rate) {
+			knotd_mod_log(mod, LOG_DEBUG, "Need more TCP queries for pref %lld", (long long)bucket->netblk);
+			knotd_mod_log(mod, LOG_DEBUG, "Slipping a truncated bit with the probablity of %.2f percent...", 100.00 * (1.0 / slip));
 			if (dnsrtt_slip_roll(slip)) {	// (1 / slip) percent of unfortunate query
-				bucket->ntok = dnsrtt->rate - 1; // restore and update bucket ntok (decreasing)
-				bucket->time = now;	// update lastseen (upcoming TCP)
+				knotd_mod_log(mod, LOG_DEBUG, "   !!! Replying a truncated bit for pref %lld !!!   ", (long long)bucket->netblk);
 				ret = KNOT_ELIMIT;
 			}
+		} else if (bucket->ntcp >= dnsrtt->rate) {
+			if (now - bucket->time > 3600) {
+				knotd_mod_log(mod, LOG_DEBUG, "Lastseen of pref %lld is more than an hour", (long long)bucket->netblk);
+				knotd_mod_log(mod, LOG_DEBUG, "Slipping a truncated bit with the probablity of %.2f percent...", 100.00 * (1.0 / slip));
+				if (dnsrtt_slip_roll(slip)) {	// (1 / slip) percent of unfortunate query
+					knotd_mod_log(mod, LOG_DEBUG, "   !!! Replying a truncated bit for pref %lld !!!   ", (long long)bucket->netblk);
+					bucket->ntcp = 0;
+					ret = KNOT_ELIMIT;
+				}
+			}
+		} else if (bucket->ntcp < 0) {
+			ret = KNOT_ERROR;
 		}
-	} else {
-		ret = KNOT_ERROR;
+	}
+
+	if (lock > -1) {
+		dnsrtt_unlock(dnsrtt, lock);
 	}
 
 	return ret;
