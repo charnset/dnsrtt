@@ -20,7 +20,7 @@
 
 #define MOD_RATE_LIMIT		"\x0A""rate-limit"	// how many tcp do we want
 #define MOD_SLIP		"\x04""slip"		// the probablity of truncated response
-#define MOD_TBL_SIZE		"\x0A""table-size"
+#define MOD_TBL_SIZE		"\x0A""table-size"	// table
 
 const yp_item_t dnsrtt_conf[] = {
 	{ MOD_RATE_LIMIT, YP_TINT, YP_VINT = { 1, INT32_MAX } },
@@ -42,6 +42,7 @@ int dnsrtt_conf_check(knotd_conf_check_args_t *args)
 
 typedef struct {
 	dnsrtt_pref_table_t *dnsrtt;
+	dnsrtt_pref_stat_t *stat;
 	int slip;
 } dnsrtt_pref_ctx_t;
 
@@ -49,7 +50,7 @@ static knotd_state_t ratelimit_apply(knotd_state_t state, knot_pkt_t *pkt,
                                      knotd_qdata_t *qdata, knotd_mod_t *mod)
 {
 	assert(pkt && qdata && mod);
-	knotd_mod_log(mod, LOG_DEBUG, "APPLYING DNS-RTT...");
+	// knotd_mod_log(mod, LOG_DEBUG, "   ========= APPLYING DNS-RTT... =========   ");
 
 	dnsrtt_pref_ctx_t *pref_ctx = knotd_mod_ctx(mod);
 	
@@ -67,7 +68,7 @@ static knotd_state_t ratelimit_apply(knotd_state_t state, knot_pkt_t *pkt,
 		tcp = tcp
 	};
 
-	int ret = dnsrtt_pref_query(pref_ctx->dnsrtt, pref_ctx->slip, qdata->params->remote, &req, mod);
+	int ret = dnsrtt_pref_query(pref_ctx->dnsrtt, pref_ctx->stat, pref_ctx->slip, qdata->params->remote, &req, mod);
 	if (ret == KNOT_EOK) {
 		// Rate limiting not applied.
 		return state;
@@ -89,14 +90,14 @@ static void pref_ctx_free(dnsrtt_pref_ctx_t *pref_ctx)
 {
 	assert(pref_ctx);
 
-	dnsrtt_pref_destroy(pref_ctx->dnsrtt);
+	dnsrtt_pref_destroy(pref_ctx->dnsrtt, pref_ctx->stat);
 	free(pref_ctx);
 }
 
 int dnsrtt_load(knotd_mod_t *mod)
 {	
 	// loading DNS-RTT
-	knotd_mod_log(mod, LOG_DEBUG, "Loading DNS-RTT...");
+	knotd_mod_log(mod, LOG_DEBUG, "   ========= Loading DNS-RTT... =========   ");
 	
 	// Create dnsrtt context.
 	dnsrtt_pref_ctx_t *pref_ctx = calloc(1, sizeof(dnsrtt_pref_ctx_t));
@@ -105,14 +106,18 @@ int dnsrtt_load(knotd_mod_t *mod)
 		return KNOT_ENOMEM;
 	}
 
-	// Create table.
+	// Create table and stat.
 	uint32_t rate = knotd_conf_mod(mod, MOD_RATE_LIMIT).single.integer;
 	size_t size = knotd_conf_mod(mod, MOD_TBL_SIZE).single.integer;
-	pref_ctx->dnsrtt = dnsrtt_pref_create(size, rate);
-	if (pref_ctx->dnsrtt == NULL) {
+	pref_ctx->dnsrtt = dnsrtt_pref_table_create(size, rate);
+	knotd_mod_log(mod, LOG_DEBUG, "1");
+	pref_ctx->stat = dnsrtt_pref_stat_create();
+	knotd_mod_log(mod, LOG_DEBUG, "2");
+	if (pref_ctx->dnsrtt == NULL || pref_ctx->stat == NULL) {
 		pref_ctx_free(pref_ctx);
 		return KNOT_ENOMEM;
 	}
+	knotd_mod_log(mod, LOG_DEBUG, "3");
 
 	// Get slip.
 	pref_ctx->slip = knotd_conf_mod(mod, MOD_SLIP).single.integer;
@@ -131,7 +136,7 @@ int dnsrtt_load(knotd_mod_t *mod)
 	}
 
 	knotd_mod_ctx_set(mod, pref_ctx);
-	knotd_mod_log(mod, LOG_DEBUG, "Loading complete: rate=%lld, table-size=%ld, slip=%ld", 
+	knotd_mod_log(mod, LOG_DEBUG, "   ========= Loading complete: rate=%lld, table-size=%ld, slip=%ld =========   ", 
 				      pref_ctx->dnsrtt->rate, pref_ctx->dnsrtt->size, pref_ctx->slip);
 	return knotd_mod_hook(mod, KNOTD_STAGE_END, ratelimit_apply);
 }

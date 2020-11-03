@@ -24,10 +24,19 @@
 #include "knot/include/module.h"
 #include "contrib/openbsd/siphash.h"
 
+typedef struct{
+	uint32_t start;	 // Starting timestamp of each interval
+	uint64_t ntcbit; // number of TC bit sent out by dnsrtt
+	uint64_t total;	 // number of prefixes whose ntcp is greater than 0
+	uint64_t valid;  // number of prefixes whose ntcp is greater than rate
+	pthread_mutex_t ll;
+} dnsrtt_pref_stat_t;	
+
 typedef struct {
 	uint64_t netblk;     // Prefix associated.
 	uint16_t ntcp;       // Number of TCP queries
 	uint32_t time;       // Timestamp.
+	bool tcbit;	     // TC bit meaning that prefix got at least one TC bit from dnsrtt
 } dnsrtt_pref_item_t;
 
 typedef struct {
@@ -57,12 +66,18 @@ typedef struct {
 } dnsrtt_req_t;
 
 /*!
+ * \brief Create a DNSRTT stat.
+ * \return created stat or NULL.
+ */
+dnsrtt_pref_stat_t *dnsrtt_pref_stat_create(void);
+
+/*!
  * \brief Create a DNSRTT table.
  * \param size Fixed hashtable size (reasonable large prime is recommended).
  * \param rate Rate (in pkts/sec).
  * \return created table or NULL.
  */
-dnsrtt_pref_table_t *dnsrtt_pref_create(size_t size, uint32_t rate);
+dnsrtt_pref_table_t *dnsrtt_pref_table_create(size_t size, uint32_t rate);
 
 /*!
  * \brief Query the DNSRTT table for accept or deny, when the rate limit is reached.
@@ -75,7 +90,7 @@ dnsrtt_pref_table_t *dnsrtt_pref_create(size_t size, uint32_t rate);
  * \retval KNOT_EOK if passed (limit is reached/enough TCP).
  * \retval KNOT_ELIMIT when needed (need more TCP).
  */
-int dnsrtt_pref_query(dnsrtt_pref_table_t *dnsrtt, int slip, const struct sockaddr_storage *remote, dnsrtt_req_t *req, knotd_mod_t *mod);
+int dnsrtt_pref_query(dnsrtt_pref_table_t *dnsrtt, dnsrtt_pref_stat_t *stat, int slip, const struct sockaddr_storage *remote, dnsrtt_req_t *req, knotd_mod_t *mod);
 
 /*!
  * \brief Roll a dice whether answer slips or not.
@@ -88,4 +103,4 @@ int dnsrtt_pref_query(dnsrtt_pref_table_t *dnsrtt, int slip, const struct sockad
  * \brief Destroy DNSRTT table.
  * \param dnsrtt DNSRTT table.
  */
-void dnsrtt_pref_destroy(dnsrtt_pref_table_t *dnsrtt);
+void dnsrtt_pref_destroy(dnsrtt_pref_table_t *dnsrtt, dnsrtt_pref_stat_t *stat);
