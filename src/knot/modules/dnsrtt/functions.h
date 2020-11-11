@@ -25,18 +25,38 @@
 #include "contrib/openbsd/siphash.h"
 
 typedef struct{
-	uint32_t start;	 // Starting timestamp of each interval
-	uint64_t ntcbit; // number of TC bit sent out by dnsrtt
-	uint64_t total;	 // number of prefixes whose ntcp is greater than 0
-	uint64_t valid;  // number of prefixes whose ntcp is greater than rate
-	pthread_mutex_t ll;
+	uint32_t start;	 		// Starting timestamp of each interval
+	pthread_mutex_t ll_str;
+
+	uint64_t n_query; 		// number of queries
+	pthread_mutex_t ll_nq;
+
+	uint64_t n_pref;		// number of prefixes
+	pthread_mutex_t ll_nprf;
+
+	uint64_t n_tcp;   		// number of tcp queries
+	pthread_mutex_t ll_ntcp;
+
+	uint64_t n_pref_valid; 		// number of prefixes whose ntcp exceeds rate (without the help from TC bit)
+	pthread_mutex_t ll_nprf_v;
+
+	uint64_t n_tcbit; 		// number of TC bit sent out by dnsrtt
+	pthread_mutex_t ll_ntcbit;
+
+	uint64_t n_tcbit_pref; 		// number of prefixes who receive at least one TC bit
+	pthread_mutex_t ll_ntcbit_prf;
+
+	uint64_t n_tcbit_pref_valid;	// number of prefixes whose tcbit == rate
+	pthread_mutex_t ll_ntcbit_pref_v;
+
 } dnsrtt_pref_stat_t;	
 
 typedef struct {
 	uint64_t netblk;     // Prefix associated.
+	uint64_t nquery;     // Number of queries
 	uint16_t ntcp;       // Number of TCP queries
 	uint32_t time;       // Timestamp.
-	bool tcbit;	     // TC bit meaning that prefix got at least one TC bit from dnsrtt
+	uint16_t tcbit;	     // number of received TC bit
 } dnsrtt_pref_item_t;
 
 typedef struct {

@@ -37,7 +37,7 @@
 // #define dnsrtt_PSIZE_LARGE 1024
 // #define dnsrtt_CAPACITY 4 /* Window size in seconds */
 #define dnsrtt_LOCK_GRANULARITY 32 /* Last digit granularity */
-#define dnsrtt_INTERVAL 60 /* Interval size in seconds */
+#define dnsrtt_INTERVAL 3600 /* Interval size in seconds */
 
 static void subnet_tostr(char *dst, size_t maxlen, const struct sockaddr_storage *ss)
 {
@@ -71,12 +71,44 @@ static void dnsrtt_unlock(dnsrtt_pref_table_t *pref_tbl, int lk_id)
 	pthread_mutex_unlock(pref_tbl->lk + lk_id);
 }
 
+static void dnsrtt_pref_stat_clear(dnsrtt_pref_stat_t *stat, uint32_t ts)
+{
+	stat->start = ts;
+	stat->n_query = 0;
+	stat->n_pref = 0;
+	stat->n_tcp = 0;
+	stat->n_pref_valid = 0;
+	stat->n_tcbit = 0;
+	stat->n_tcbit_pref = 0;
+	stat->n_tcbit_pref_valid = 0;
+}
+
 static int dnsrtt_pref_stat_setlocks(dnsrtt_pref_stat_t *pref_stat)
 {
-	if (pthread_mutex_init(&pref_stat->ll, NULL) < 0) {
+	if (pthread_mutex_init(&pref_stat->ll_str, NULL) < 0) {
 		return KNOT_ENOMEM;
 	}
-
+	if (pthread_mutex_init(&pref_stat->ll_nq, NULL) < 0) {
+		return KNOT_ENOMEM;
+	}
+	if (pthread_mutex_init(&pref_stat->ll_nprf, NULL) < 0) {
+		return KNOT_ENOMEM;
+	}
+	if (pthread_mutex_init(&pref_stat->ll_ntcp, NULL) < 0) {
+		return KNOT_ENOMEM;
+	}
+	if (pthread_mutex_init(&pref_stat->ll_nprf_v, NULL) < 0) {
+		return KNOT_ENOMEM;
+	}
+	if (pthread_mutex_init(&pref_stat->ll_ntcbit, NULL) < 0) {
+		return KNOT_ENOMEM;
+	}
+	if (pthread_mutex_init(&pref_stat->ll_ntcbit_prf, NULL) < 0) {
+		return KNOT_ENOMEM;
+	}
+	if (pthread_mutex_init(&pref_stat->ll_ntcbit_pref_v, NULL) < 0) {
+		return KNOT_ENOMEM;
+	}
 	return KNOT_EOK;
 }
 
@@ -89,10 +121,8 @@ dnsrtt_pref_stat_t *dnsrtt_pref_stat_create(void)
 	if (!pref_stat) {
 		return NULL;
 	}
-	pref_stat->start = time_now().tv_sec;
-	pref_stat->ntcbit = 0;
-	pref_stat->total = 0;
-	pref_stat->valid = 0;
+
+	dnsrtt_pref_stat_clear(pref_stat, time_now().tv_sec);
 	//knotd_mod_log(mod, LOG_DEBUG, "1.7");
 
 	if (dnsrtt_pref_stat_setlocks(pref_stat) != KNOT_EOK) {
@@ -180,23 +210,39 @@ bool dnsrtt_slip_roll(int n_slip)
 	}
 }
 
-static void dnsrtt_pref_stat_update(dnsrtt_pref_stat_t *stat, bool tc, bool total, bool valid)
+static void dnsrtt_pref_stat_update(dnsrtt_pref_stat_t *stat, bool tcp, bool pref_valid, bool tcbit, bool tcbit_pref, bool tcbit_pref_valid)
 {
 	// lock to update stat
-	// tc : is TC bit or not?
-	// total : is prefix getting its first TC bit?
-	// valid : is prefex exceeding the rate?
-	pthread_mutex_lock(&stat->ll);
-	if (tc) {
-		if (total) {
-			stat->total += 1;
-		}
-		stat->ntcbit += 1;
+	// tcp: tcp query?
+	// pref_valid: ntcp == rate (w/o TC bit help)?
+	// tcbit: TC bit reply?
+	// tcbit_pref: first TC bit reply for that prefix?
+	// tcbit_pref_valid: ntcbit == rate?
+	if (tcp) {
+		pthread_mutex_lock(&stat->ll_ntcp);
+		++stat->n_tcp;
+		pthread_mutex_unlock(&stat->ll_ntcp);
 	}
-	if (valid) {
-		stat->valid += 1;
+	if (pref_valid) {
+		pthread_mutex_lock(&stat->ll_nprf_v);
+		++stat->n_pref_valid;
+		pthread_mutex_unlock(&stat->ll_nprf_v);
 	}
-	pthread_mutex_unlock(&stat->ll);
+	if (tcbit) {
+		pthread_mutex_lock(&stat->ll_ntcbit);
+		++stat->n_tcbit;
+		pthread_mutex_unlock(&stat->ll_ntcbit);
+	}
+	if (tcbit_pref) {
+		pthread_mutex_lock(&stat->ll_ntcbit_prf);
+		++stat->n_tcbit_pref;
+		pthread_mutex_unlock(&stat->ll_ntcbit_prf);
+	}
+	if (tcbit_pref_valid) {
+		pthread_mutex_lock(&stat->ll_ntcbit_pref_v);
+		++stat->n_tcbit_pref_valid;
+		pthread_mutex_unlock(&stat->ll_ntcbit_pref_v);
+	}
 }
 
 static dnsrtt_pref_item_t *dnsrtt_pref_id(dnsrtt_pref_table_t *tbl, const struct sockaddr_storage *remote,
@@ -227,9 +273,10 @@ static dnsrtt_pref_item_t *dnsrtt_pref_id(dnsrtt_pref_table_t *tbl, const struct
 	dnsrtt_pref_item_t *bucket = &tbl->arr[id];
 
 	// Check whether bucket is empty or not
-	if (!bucket->netblk && !bucket->ntcp && !bucket->time) {
-		knotd_mod_log(mod, LOG_DEBUG, "Initiating an empty bucket...");
+	if (!bucket->netblk) {
+		// knotd_mod_log(mod, LOG_DEBUG, "Initiating an empty bucket...");
 		bucket->netblk = netblk;
+		bucket->nquery = 0;
 		bucket->ntcp = 0;
 		bucket->time = stamp;
 		bucket->tcbit = 0;
@@ -259,49 +306,70 @@ int dnsrtt_pref_query(dnsrtt_pref_table_t *dnsrtt, dnsrtt_pref_stat_t *stat, int
 		return KNOT_ERROR;
 	}
 
-	// Fetch start (interval)
-	pthread_mutex_lock(&stat->ll);
-	uint32_t start = stat->start;	
-	pthread_mutex_unlock(&stat->ll);
-
-	// New interval or not?, if so refresh bucket
-	if (bucket->time < start) {
-		bucket->ntcp = 0;
-		bucket->time = start;
-		bucket->tcbit = 0;
-	}
-
 	// Visit bucket
 	// knotd_mod_log(mod, LOG_DEBUG, "Visiting a bucket...");
 	char addr_str[SOCKADDR_STRLEN];
 	subnet_tostr(addr_str, sizeof(addr_str), remote);
 	// knotd_mod_log(mod, LOG_DEBUG, "IP %s, pref %lld, ntcp %lld, lastseen %lld", addr_str, (long long)bucket->netblk, (long long)bucket->ntcp, (long long)bucket->time);
 	
+
+	// Fetch start and update n_query (interval) 
+	pthread_mutex_lock(&stat->ll_str);
+	uint32_t start = stat->start;
+	pthread_mutex_unlock(&stat->ll_str);
+
+	pthread_mutex_lock(&stat->ll_nq);
+	stat->n_query += 1;
+	pthread_mutex_unlock(&stat->ll_nq);
+
+	// New interval or not?, if so refresh bucket
+	if (bucket->time < start) {
+		knotd_mod_log(mod, LOG_INFO, "BUCKET,%s,%lld,%lld,%lld,%lld", addr_str, (long long)bucket->nquery, (long long)bucket->ntcp, 
+					(long long)bucket->tcbit, (long long)start);
+		bucket->nquery = 0;
+		bucket->ntcp = 0;
+		bucket->time = now;
+		bucket->tcbit = 0;
+	}
+
+	// Update bucket (number of queries, time)
+	++bucket->nquery;
+	if (bucket->nquery == 1) {
+		pthread_mutex_lock(&stat->ll_nprf);
+		++stat->n_pref;
+		pthread_mutex_unlock(&stat->ll_nprf);
+	}
+	bucket->time = now;	
+
 	if (req->tcp) {	// TCP queries
-		knotd_mod_log(mod, LOG_DEBUG, "(TCP) IP %s, pref %lld, ntcp %lld, lastseen %lld", 
-						addr_str, (long long)bucket->netblk, (long long)bucket->ntcp, (long long)bucket->time);
+		// knotd_mod_log(mod, LOG_DEBUG, "(TCP) IP %s, pref %lld, ntcp %lld, lastseen %lld", 
+						//addr_str, (long long)bucket->netblk, (long long)bucket->ntcp, (long long)bucket->time);
 		++bucket->ntcp; // update bucket ntcp (increasing)
-		bucket->time = now; // update lastseen
+		// bucket->time = now; // update lastseen
 		if (bucket->ntcp == dnsrtt->rate) {
-			dnsrtt_pref_stat_update(stat, 0, 0, 1); // lock for stat update
+			dnsrtt_pref_stat_update(stat, 1, 1, 0, 0, 0);
+		} else {
+			dnsrtt_pref_stat_update(stat, 1, 0, 0, 0, 0);
 		}
 	} else { // UDP queries
-		knotd_mod_log(mod, LOG_DEBUG, "(UDP) IP %s, pref %lld, ntcp %lld, lastseen %lld", 
-						addr_str, (long long)bucket->netblk, (long long)bucket->ntcp, (long long)bucket->time);
+	   	// knotd_mod_log(mod, LOG_DEBUG, "(UDP) IP %s, pref %lld, ntcp %lld, lastseen %lld", 
+						//addr_str, (long long)bucket->netblk, (long long)bucket->ntcp, (long long)bucket->time);
 		// Check number of tcp queries
 		// ntcp < rate means we will send back a truncated response of probability of 1/slip percent
-		// ntcp >= rate  means we will do nothing, unless lastseen is more than an hour we will send back a truncated response and reset ntcp to 0
+		// ntcp >= rate  means we will do nothing
 		// ntcp < 0 means something went wrong, report KNOT_ERROR
-		if (bucket->ntcp < dnsrtt->rate) {
-			knotd_mod_log(mod, LOG_DEBUG, "Need more TCP queries for pref %lld", (long long)bucket->netblk);
-			knotd_mod_log(mod, LOG_DEBUG, "Slipping a TC bit with the probablity of %.2f percent...", 100.00 * (1.0 / slip));
+		if (bucket->ntcp + bucket->tcbit < dnsrtt->rate) {
+			// knotd_mod_log(mod, LOG_DEBUG, "Need more TCP queries for pref %lld", (long long)bucket->netblk);
+			// knotd_mod_log(mod, LOG_DEBUG, "Slipping a TC bit with the probablity of %.2f percent...", 100.00 * (1.0 / slip));			
 			if (dnsrtt_slip_roll(slip)) {	// (1 / slip) percent of unfortunate query
-				knotd_mod_log(mod, LOG_DEBUG, "   !!! Replying a TC bit to pref %lld !!!   ", (long long)bucket->netblk);
-				if (!bucket->tcbit) {	// first TC bit
-					bucket->tcbit = 1;
-					dnsrtt_pref_stat_update(stat, 1, 1, 0);	// lock for stat update
+				// knotd_mod_log(mod, LOG_DEBUG, "   !!! Replying a TC bit to pref %lld !!!   ", (long long)bucket->netblk);
+				++bucket->tcbit;
+				if (bucket->tcbit == 1) {	// first TC bit
+					dnsrtt_pref_stat_update(stat, 0, 0, 1, 1, 0);
+				} else if (bucket->tcbit == dnsrtt->rate) {
+					dnsrtt_pref_stat_update(stat, 0, 0, 1, 0, 1);
 				} else {
-					dnsrtt_pref_stat_update(stat, 1, 0, 0);	// lock for stat update
+					dnsrtt_pref_stat_update(stat, 0, 0, 1, 0, 0);
 				}
 				ret = KNOT_ELIMIT;
 			}
@@ -316,15 +384,29 @@ int dnsrtt_pref_query(dnsrtt_pref_table_t *dnsrtt, dnsrtt_pref_stat_t *stat, int
 
 	// Report and refresh stat
 	if (now - start > dnsrtt_INTERVAL) {	// only if stat is older than one interval
-		// Lock to report and refresh
-		pthread_mutex_lock(&stat->ll);
-		knotd_mod_log(mod, LOG_INFO, "STAT:   start %lld, end %lld, ntcbit %lld, total %lld, valid %lld", 
-						(long long)stat->start, (long long)now, (long long)stat->ntcbit, (long long)stat->total, (long long)stat->valid);
-		stat->ntcbit = 0;
-		stat->total = 0;
-		stat->valid = 0;
-		stat->start = now;		
-		pthread_mutex_unlock(&stat->ll);
+		// Lock to report and refresh stat
+		pthread_mutex_lock(&stat->ll_str);
+		knotd_mod_log(mod, LOG_INFO, "STAT,%lld,%lld,%lld,%lld,%lld,%lld,%lld,%lld,%lld"
+				, (long long)stat->start, (long long)now, (long long)stat->n_query, (long long)stat->n_pref, (long long)stat->n_tcp, 
+				(long long)stat->n_pref_valid, (long long)stat->n_tcbit, (long long)stat->n_tcbit_pref, (long long)stat->n_tcbit_pref_valid);
+	
+		dnsrtt_pref_stat_clear(stat, now);
+		pthread_mutex_unlock(&stat->ll_str);
+
+		/*
+		pthread_mutex_lock(&dnsrtt->ll);
+		FILE *fp;
+		fp = fopen("/home/charnset/write_log", "a+");
+		fprintf(fp, "ts %lld\n", (long long)now);
+		for (int i = 0; i < 16581375; i++) {
+			dnsrtt_pref_item_t *bck = &dnsrtt->arr[i];
+			if (!bck->netblk) {
+				fprintf(fp, "%lld\n", (long long)bck->nquery);
+			}
+		}
+		fclose(fp);
+		pthread_mutex_unlock(&dnsrtt->ll);
+		*/
 	}
 
 	return ret;
@@ -345,7 +427,14 @@ void dnsrtt_pref_destroy(dnsrtt_pref_table_t *dnsrtt, dnsrtt_pref_stat_t *stat)
 	free(dnsrtt);
 
 	if (stat) {
-		pthread_mutex_destroy(&stat->ll);
+		pthread_mutex_destroy(&stat->ll_str);
+		pthread_mutex_destroy(&stat->ll_nq);
+		pthread_mutex_destroy(&stat->ll_nprf);
+		pthread_mutex_destroy(&stat->ll_ntcp);
+		pthread_mutex_destroy(&stat->ll_nprf_v);
+		pthread_mutex_destroy(&stat->ll_ntcbit);
+		pthread_mutex_destroy(&stat->ll_ntcbit_prf);
+		pthread_mutex_destroy(&stat->ll_ntcbit_pref_v);
 	}
 
 	free(stat);
