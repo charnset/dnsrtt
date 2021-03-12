@@ -24,54 +24,45 @@
 #include "knot/include/module.h"
 #include "contrib/openbsd/siphash.h"
 
-typedef struct{
-	uint32_t start;	 		// Starting timestamp of each interval
-	pthread_mutex_t ll_str;
-
-	uint64_t n_query; 		// number of queries
-	pthread_mutex_t ll_nq;
-
-	uint64_t n_pref;		// number of prefixes
-	pthread_mutex_t ll_nprf;
-
-	uint64_t n_tcp;   		// number of tcp queries
-	pthread_mutex_t ll_ntcp;
-
-	uint64_t n_pref_valid; 		// number of prefixes whose ntcp exceeds rate (without the help from TC bit)
-	pthread_mutex_t ll_nprf_v;
-
-	uint64_t n_tcbit; 		// number of TC bit sent out by dnsrtt
-	pthread_mutex_t ll_ntcbit;
-
-	uint64_t n_tcbit_pref; 		// number of prefixes who receive at least one TC bit
-	pthread_mutex_t ll_ntcbit_prf;
-
-	uint64_t n_tcbit_pref_valid;	// number of prefixes whose tcbit == rate
-	pthread_mutex_t ll_ntcbit_pref_v;
-
-} dnsrtt_pref_stat_t;	
-
+/*!
+ * \brief DNSRTT hash bucket.
+ */
 typedef struct {
-	uint64_t netblk;     // Prefix associated.
-	uint64_t nquery;     // Number of queries
+	unsigned hop;        // Hop bitmap
+	uint64_t netblk;     // Prefix associated
 	uint16_t ntcp;       // Number of TCP queries
-	uint32_t time;       // Timestamp.
+	uint8_t  cls;        // Bucket class
+	uint32_t qname;      // imputed(QNAME) hash
+	uint32_t time;       // Timestamp
 	uint16_t tcbit;	     // number of received TC bit
-} dnsrtt_pref_item_t;
+} dnsrtt_item_t;
+
+/*!
+ * \brief DNSRTT hash bucket table.
+ *
+ * Table is fixed size, so collisions may occur and are dealt with
+ * in a way, that hashbucket rate is reset and enters slow-start for 1 dt.
+ * When a bucket is in a slow-start mode, it cannot reset again for the time
+ * period.
+ *
+ * To avoid lock contention, N locks are created and distributed amongst buckets.
+ * As of now lock K for bucket N is calculated as K = N % (num_buckets).
+ */
 
 typedef struct {
+	SIPHASH_KEY key;     // Siphash key
 	uint32_t rate;		// Configured number of needed TCP queries per prefix
 	pthread_mutex_t ll;	
 	pthread_mutex_t *lk;	// Table locks
 	unsigned lk_count;	// Table lock count (granularity)
-	size_t size;		// number of buckets
-	dnsrtt_pref_item_t arr[];	// buckets array
-} dnsrtt_pref_table_t;
+	size_t size;		// Number of buckets
+	dnsrtt_item_t arr[];	// Buckets
+} dnsrtt_table_t;
 
 /*! \brief DNSRTT request flags. */
 typedef enum {
-	DNSRTT_REQ_NOFLAG    = 0 << 0, /*!< No flags. */
-	DNSRTT_REQ_WILDCARD  = 1 << 1  /*!< Query to wildcard name. */
+	dnsrtt_REQ_NOFLAG    = 0 << 0, /*!< No flags. */
+	dnsrtt_REQ_WILDCARD  = 1 << 1  /*!< Query to wildcard name. */
 } dnsrtt_req_flag_t;
 
 /*!
@@ -86,41 +77,29 @@ typedef struct {
 } dnsrtt_req_t;
 
 /*!
- * \brief Create a DNSRTT stat.
- * \return created stat or NULL.
- */
-dnsrtt_pref_stat_t *dnsrtt_pref_stat_create(void);
-
-/*!
  * \brief Create a DNSRTT table.
  * \param size Fixed hashtable size (reasonable large prime is recommended).
  * \param rate Rate (in pkts/sec).
  * \return created table or NULL.
  */
-dnsrtt_pref_table_t *dnsrtt_pref_table_create(size_t size, uint32_t rate);
+dnsrtt_table_t *dnsrtt_create(size_t size, uint32_t rate);
 
 /*!
  * \brief Query the DNSRTT table for accept or deny, when the rate limit is reached.
  *
  * \param dnsrtt DNSRTT table.
- * \param dnsrtt DNSRTT slip.
+ * \param slip DNSRTT slip.
  * \param remote Source address.
  * \param req DNSRTT request (containing resp., flags and question).
+ • \param zone Zone name related to the response (or NULL).
  * \param mod Query module (needed for logging).
- * \retval KNOT_EOK if passed (limit is reached/enough TCP).
- * \retval KNOT_ELIMIT when needed (need more TCP).
+ * \retval KNOT_EOK when did not send back TC bit.
+ * \retval KNOT_ELIMIT when sended back TC bit.
  */
-int dnsrtt_pref_query(dnsrtt_pref_table_t *dnsrtt, dnsrtt_pref_stat_t *stat, int slip, const struct sockaddr_storage *remote, dnsrtt_req_t *req, knotd_mod_t *mod);
-
-/*!
- * \brief Roll a dice whether answer slips or not.
- * \param n_slip Number represents every Nth answer that is slipped.
- * \return true or false
- */
-// bool dnsrtt_slip_roll(int n_slip);
+int dnsrtt_query(dnsrtt_table_t *dnsrtt, int slip, const struct sockaddr_storage *remote, 
+					dnsrtt_req_t *req, const knot_dname_t *zone, knotd_mod_t *mod);
 
 /*!
  * \brief Destroy DNSRTT table.
- * \param dnsrtt DNSRTT table.
  */
-void dnsrtt_pref_destroy(dnsrtt_pref_table_t *dnsrtt, dnsrtt_pref_stat_t *stat);
+void dnsrtt_destroy(dnsrtt_table_t *dnsrtt);

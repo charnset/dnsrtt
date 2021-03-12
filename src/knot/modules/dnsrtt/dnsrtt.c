@@ -21,11 +21,13 @@
 #define MOD_RATE_LIMIT		"\x0A""rate-limit"	// how many tcp do we want
 #define MOD_SLIP		"\x04""slip"		// the probablity of truncated response
 #define MOD_TBL_SIZE		"\x0A""table-size"	// table
+#define MOD_WHITELIST		"\x09""whitelist"
 
 const yp_item_t dnsrtt_conf[] = {
 	{ MOD_RATE_LIMIT, YP_TINT, YP_VINT = { 1, INT32_MAX } },
 	{ MOD_SLIP,       YP_TINT, YP_VINT = { 0, 100, 1 } },
 	{ MOD_TBL_SIZE,   YP_TINT, YP_VINT = { 1, INT64_MAX, 393241 } },
+	{ MOD_WHITELIST,  YP_TNET, YP_VNONE, YP_FMULTI },
 	{ NULL }
 };
 
@@ -41,10 +43,37 @@ int dnsrtt_conf_check(knotd_conf_check_args_t *args)
 }
 
 typedef struct {
-	dnsrtt_pref_table_t *dnsrtt;
-	dnsrtt_pref_stat_t *stat;
+	dnsrtt_table_t *dnsrtt;
+	//dnsrtt_stat_t *stat;
 	int slip;
-} dnsrtt_pref_ctx_t;
+	knotd_conf_t whitelist;
+} dnsrtt_ctx_t;
+
+static const knot_dname_t *name_from_rrsig(const knot_rrset_t *rr)
+{
+	if (rr == NULL) {
+		return NULL;
+	}
+	if (rr->type != KNOT_RRTYPE_RRSIG) {
+		return NULL;
+	}
+
+	// This is a signature.
+	return knot_rrsig_signer_name(rr->rrs.rdata);
+}
+
+static const knot_dname_t *name_from_authrr(const knot_rrset_t *rr)
+{
+	if (rr == NULL) {
+		return NULL;
+	}
+	if (rr->type != KNOT_RRTYPE_NS && rr->type != KNOT_RRTYPE_SOA) {
+		return NULL;
+	}
+
+	// This is a valid authority RR.
+	return rr->owner;
+}
 
 static knotd_state_t ratelimit_apply(knotd_state_t state, knot_pkt_t *pkt,
                                      knotd_qdata_t *qdata, knotd_mod_t *mod)
@@ -52,12 +81,22 @@ static knotd_state_t ratelimit_apply(knotd_state_t state, knot_pkt_t *pkt,
 	assert(pkt && qdata && mod);
 	// knotd_mod_log(mod, LOG_DEBUG, "   ========= APPLYING DNS-RTT... =========   ");
 
-	dnsrtt_pref_ctx_t *pref_ctx = knotd_mod_ctx(mod);
+	dnsrtt_ctx_t *ctx = knotd_mod_ctx(mod);
 	
 	// check whether a query is TCP or not
 	bool tcp = false;
 	if (!(qdata->params->flags & KNOTD_QUERY_FLAG_LIMIT_SIZE)) {
 		tcp = true;
+	}
+
+	// DNSRTT is not applied to responses with a valid cookie.
+	if (qdata->params->flags & KNOTD_QUERY_FLAG_COOKIE) {
+		return state;
+	}
+
+	// Exempt clients.
+	if (knotd_conf_addr_range_match(&ctx->whitelist, qdata->params->remote)) {
+		return state;
 	}	
 
 	// knotd_mod_log(mod, LOG_DEBUG, "Query flags: %d", qdata->params->flags);
@@ -68,84 +107,97 @@ static knotd_state_t ratelimit_apply(knotd_state_t state, knot_pkt_t *pkt,
 		tcp = tcp
 	};
 
-	int ret = dnsrtt_pref_query(pref_ctx->dnsrtt, pref_ctx->stat, pref_ctx->slip, qdata->params->remote, &req, mod);
+	if (!EMPTY_LIST(qdata->extra->wildcards)) {
+		req.flags = dnsrtt_REQ_WILDCARD;
+	}
+
+	// Take the zone name if known.
+	const knot_dname_t *zone_name = knotd_qdata_zone_name(qdata);
+
+	// Take the signer name as zone name if there is an RRSIG.
+	if (zone_name == NULL) {
+		const knot_pktsection_t *ans = knot_pkt_section(pkt, KNOT_ANSWER);
+		for (int i = 0; i < ans->count; i++) {
+			zone_name = name_from_rrsig(knot_pkt_rr(ans, i));
+			if (zone_name != NULL) {
+				break;
+			}
+		}
+	}
+
+	// Take the NS or SOA owner name if there is no RRSIG.
+	if (zone_name == NULL) {
+		const knot_pktsection_t *auth = knot_pkt_section(pkt, KNOT_AUTHORITY);
+		for (int i = 0; i < auth->count; i++) {
+			zone_name = name_from_authrr(knot_pkt_rr(auth, i));
+			if (zone_name != NULL) {
+				break;
+			}
+		}
+	}
+
+	int ret = dnsrtt_query(ctx->dnsrtt, ctx->slip, qdata->params->remote, &req, zone_name, mod);
 	if (ret == KNOT_EOK) {
-		// Rate limiting not applied.
+		// DNSRTT not applied.
 		return state;
 	}
 
 	if (ret == KNOT_ELIMIT) {
 		// Slip the answer (truncated).
-		knotd_mod_stats_incr(mod, qdata->params->thread_id, 0, 0, 1);
 		qdata->err_truncated = true;
 		return KNOTD_STATE_FAIL;
 	} else {
 		// Drop the answer.
-		knotd_mod_stats_incr(mod, qdata->params->thread_id, 1, 0, 1);
 		return KNOTD_STATE_NOOP;
 	}
 }
 
-static void pref_ctx_free(dnsrtt_pref_ctx_t *pref_ctx)
+static void dnsrtt_ctx_free(dnsrtt_ctx_t *ctx)
 {
-	assert(pref_ctx);
+	assert(ctx);
 
-	dnsrtt_pref_destroy(pref_ctx->dnsrtt, pref_ctx->stat);
-	free(pref_ctx);
+	dnsrtt_destroy(ctx->dnsrtt);
+	free(ctx);
 }
 
 int dnsrtt_load(knotd_mod_t *mod)
 {	
-	// loading DNS-RTT
-	knotd_mod_log(mod, LOG_DEBUG, "   ========= Loading DNS-RTT... =========   ");
+	// loading DNSRTT
+	knotd_mod_log(mod, LOG_DEBUG, "   ========= Loading DNSRTT... =========   ");
 	
-	// Create dnsrtt context.
-	dnsrtt_pref_ctx_t *pref_ctx = calloc(1, sizeof(dnsrtt_pref_ctx_t));
-
-	if (pref_ctx == NULL) {
+	// Create DNSRTT context.
+	dnsrtt_ctx_t *ctx = calloc(1, sizeof(dnsrtt_ctx_t));
+	if (ctx == NULL) {
 		return KNOT_ENOMEM;
 	}
 
-	// Create table and stat.
+	// Create table
+	// and stat.
 	uint32_t rate = knotd_conf_mod(mod, MOD_RATE_LIMIT).single.integer;
 	size_t size = knotd_conf_mod(mod, MOD_TBL_SIZE).single.integer;
-	pref_ctx->dnsrtt = dnsrtt_pref_table_create(size, rate);
-	knotd_mod_log(mod, LOG_DEBUG, "1");
-	pref_ctx->stat = dnsrtt_pref_stat_create();
-	knotd_mod_log(mod, LOG_DEBUG, "2");
-	if (pref_ctx->dnsrtt == NULL || pref_ctx->stat == NULL) {
-		pref_ctx_free(pref_ctx);
+	ctx->dnsrtt = dnsrtt_create(size, rate);
+	if (ctx->dnsrtt == NULL) {
+		dnsrtt_ctx_free(ctx);
 		return KNOT_ENOMEM;
 	}
-	knotd_mod_log(mod, LOG_DEBUG, "3");
 
 	// Get slip.
-	pref_ctx->slip = knotd_conf_mod(mod, MOD_SLIP).single.integer;
+	ctx->slip = knotd_conf_mod(mod, MOD_SLIP).single.integer;
 
-	// Set up statistics counters.
-	int ret = knotd_mod_stats_add(mod, "slipped", 1, NULL);
-	if (ret != KNOT_EOK) {
-		pref_ctx_free(pref_ctx);
-		return ret;
-	}
+	// Get whitelist.
+	ctx->whitelist = knotd_conf_mod(mod, MOD_WHITELIST);
 
-	ret = knotd_mod_stats_add(mod, "dropped", 1, NULL);
-	if (ret != KNOT_EOK) {
-		pref_ctx_free(pref_ctx);
-		return ret;
-	}
-
-	knotd_mod_ctx_set(mod, pref_ctx);
+	knotd_mod_ctx_set(mod, ctx);
 	knotd_mod_log(mod, LOG_DEBUG, "   ========= Loading complete: rate=%lld, table-size=%ld, slip=%ld =========   ", 
-				      pref_ctx->dnsrtt->rate, pref_ctx->dnsrtt->size, pref_ctx->slip);
+				      ctx->dnsrtt->rate, ctx->dnsrtt->size, ctx->slip);
 	return knotd_mod_hook(mod, KNOTD_STAGE_END, ratelimit_apply);
 }
 
 void dnsrtt_unload(knotd_mod_t *mod)
 {
-	dnsrtt_pref_ctx_t *pref_ctx = knotd_mod_ctx(mod);
+	dnsrtt_ctx_t *ctx = knotd_mod_ctx(mod);
 
-	pref_ctx_free(pref_ctx);
+	dnsrtt_ctx_free(ctx);
 }
 
 KNOTD_MOD_API(dnsrtt, KNOTD_MOD_FLAG_SCOPE_ANY,
