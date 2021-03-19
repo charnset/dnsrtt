@@ -472,9 +472,17 @@ int dnsrtt_query(dnsrtt_table_t *dnsrtt, int slip, const struct sockaddr_storage
 		if ntcp < 0, something went wrong, report KNOT_ERROR
 	*/
 		if (bucket->ntcp < dnsrtt->rate) {
+			/* production: slip => increase tcbit counter => send back tcbit */
+			/* experiment: slip => increase tcbit counter & tcp counter (don't actually send back tcbit but keep counting */
 			if (dnsrtt_slip_roll(slip)) {	// (1 / slip) percent of unfortunate query
+			/*	production
 				++bucket->tcbit;
-				ret = KNOT_ELIMIT;
+			 	ret = KNOT_ELIMIT;
+			*/
+			
+			//	experiment
+				++bucket->tcbit;
+				++bucket->ntcp;
 			}
 		} else if (bucket->ntcp < 0) {
 			ret = KNOT_ERROR;

@@ -172,7 +172,6 @@ int dnsrtt_load(knotd_mod_t *mod)
 	}
 
 	// Create table
-	// and stat.
 	uint32_t rate = knotd_conf_mod(mod, MOD_RATE_LIMIT).single.integer;
 	size_t size = knotd_conf_mod(mod, MOD_TBL_SIZE).single.integer;
 	ctx->dnsrtt = dnsrtt_create(size, rate);
