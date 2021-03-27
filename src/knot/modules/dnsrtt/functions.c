@@ -34,7 +34,6 @@
 /* Defaults */
 #define dnsrtt_PSIZE_LARGE 1024
 #define dnsrtt_LOCK_GRANULARITY 32 /* Last digit granularity */
-#define dnsrtt_INTERVAL 60 /* Interval size in seconds */
 
 /* Classification */
 enum {
@@ -196,9 +195,9 @@ static int dnsrtt_classify(uint8_t *dst, size_t maxlen, const struct sockaddr_st
 	return blklen;
 }
 
-static int bucket_free(dnsrtt_item_t *bucket, uint32_t now)
+static int bucket_free(dnsrtt_item_t *bucket, uint32_t now, uint32_t interval)
 {
-	return bucket->cls == CLS_NULL || (bucket->time + dnsrtt_INTERVAL < now);
+	return bucket->cls == CLS_NULL || (bucket->time + interval < now);
 }
 
 static int bucket_match(dnsrtt_item_t *bucket, dnsrtt_item_t *match)
@@ -209,12 +208,12 @@ static int bucket_match(dnsrtt_item_t *bucket, dnsrtt_item_t *match)
 static int find_free(dnsrtt_table_t *tbl, unsigned id, uint32_t now)
 {
 	for (int i = id; i < tbl->size; i++) {
-		if (bucket_free(&tbl->arr[i], now)) {
+		if (bucket_free(&tbl->arr[i], now, tbl->interval)) {
 			return i - id;
 		}
 	}
 	for (int i = 0; i < id; i++) {
-		if (bucket_free(&tbl->arr[i], now)) {
+		if (bucket_free(&tbl->arr[i], now, tbl->interval)) {
 			return i + (tbl->size - id);
 		}
 	}
@@ -338,7 +337,7 @@ static int dnsrtt_setlocks(dnsrtt_table_t *tbl, uint32_t granularity)
 	return KNOT_EOK;
 }
 
-dnsrtt_table_t *dnsrtt_create(size_t size, uint32_t rate)
+dnsrtt_table_t *dnsrtt_create(size_t size, uint32_t rate, uint32_t interval)
 {
 	if (size == 0) {
 		return NULL;
@@ -351,6 +350,7 @@ dnsrtt_table_t *dnsrtt_create(size_t size, uint32_t rate)
 	}
 	tbl->size = size;
 	tbl->rate = rate;
+	tbl->interval = interval;
 
 	if (dnssec_random_buffer((uint8_t *)&tbl->key, sizeof(tbl->key)) != DNSSEC_EOK) {
 		free(tbl);
@@ -457,7 +457,7 @@ int dnsrtt_query(dnsrtt_table_t *dnsrtt, int slip, const struct sockaddr_storage
 					(long long)bucket->netblk, (long long)bucket->ntcp, (long long)bucket->time);
 
 	/* Check if bucket expired (time + interval < now) */
-	if (bucket->time + dnsrtt_INTERVAL < now) {
+	if (bucket->time + dnsrtt->interval < now) {
 		bucket->ntcp = 0;
 		bucket->time = now;
 		bucket->tcbit = 0;

@@ -50,12 +50,13 @@ typedef struct {
  */
 
 typedef struct {
-	SIPHASH_KEY key;     // Siphash key
-	uint32_t rate;		// Configured number of needed TCP queries per prefix
+	SIPHASH_KEY key;     	// Siphash key
+	uint32_t rate;			// Configured number of needed TCP queries per prefix
+	uint32_t interval;		// interval in seconds	
 	pthread_mutex_t ll;	
 	pthread_mutex_t *lk;	// Table locks
-	unsigned lk_count;	// Table lock count (granularity)
-	size_t size;		// Number of buckets
+	unsigned lk_count;		// Table lock count (granularity)
+	size_t size;			// Number of buckets
 	dnsrtt_item_t arr[];	// Buckets
 } dnsrtt_table_t;
 
@@ -80,9 +81,10 @@ typedef struct {
  * \brief Create a DNSRTT table.
  * \param size Fixed hashtable size (reasonable large prime is recommended).
  * \param rate Rate (in pkts/sec).
+ * \param interval (in secs).
  * \return created table or NULL.
  */
-dnsrtt_table_t *dnsrtt_create(size_t size, uint32_t rate);
+dnsrtt_table_t *dnsrtt_create(size_t size, uint32_t rate, uint32_t interval);
 
 /*!
  * \brief Query the DNSRTT table for accept or deny, when the rate limit is reached.

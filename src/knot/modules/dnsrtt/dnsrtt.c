@@ -18,22 +18,24 @@
 #include "knot/nameserver/process_query.h" // Dependency on qdata->extra!
 #include "knot/modules/dnsrtt/functions.h"
 
-#define MOD_RATE_LIMIT		"\x0A""rate-limit"	// how many tcp do we want
+#define MOD_TCP_NEED	"\x08""tcp-need"	// how many tcp do we want
 #define MOD_SLIP		"\x04""slip"		// the probablity of truncated response
-#define MOD_TBL_SIZE		"\x0A""table-size"	// table
-#define MOD_WHITELIST		"\x09""whitelist"
+#define MOD_TBL_SIZE	"\x0A""table-size"	// table
+#define MOD_WHITELIST	"\x09""whitelist"
+#define MOD_INTERVAL	"\x08""interval"	// interval in seconds
 
 const yp_item_t dnsrtt_conf[] = {
-	{ MOD_RATE_LIMIT, YP_TINT, YP_VINT = { 1, INT32_MAX } },
-	{ MOD_SLIP,       YP_TINT, YP_VINT = { 0, 100, 1 } },
-	{ MOD_TBL_SIZE,   YP_TINT, YP_VINT = { 1, INT64_MAX, 393241 } },
-	{ MOD_WHITELIST,  YP_TNET, YP_VNONE, YP_FMULTI },
+	{ MOD_TCP_NEED,	YP_TINT, YP_VINT = { 1, INT32_MAX } },
+	{ MOD_SLIP,   	YP_TINT, YP_VINT = { 0, 100, 1 } },
+	{ MOD_TBL_SIZE, YP_TINT, YP_VINT = { 1, INT64_MAX, 393241 } },
+	{ MOD_WHITELIST,YP_TNET, YP_VNONE, YP_FMULTI },
+	{ MOD_INTERVAL, YP_TINT, YP_VINT = { 1, INT32_MAX, 3600}},
 	{ NULL }
 };
 
 int dnsrtt_conf_check(knotd_conf_check_args_t *args)
 {
-	knotd_conf_t limit = knotd_conf_check_item(args, MOD_RATE_LIMIT);
+	knotd_conf_t limit = knotd_conf_check_item(args, MOD_TCP_NEED);
 	if (limit.count == 0) {
 		args->err_str = "no rate limit specified";
 		return KNOT_EINVAL;
@@ -44,7 +46,6 @@ int dnsrtt_conf_check(knotd_conf_check_args_t *args)
 
 typedef struct {
 	dnsrtt_table_t *dnsrtt;
-	//dnsrtt_stat_t *stat;
 	int slip;
 	knotd_conf_t whitelist;
 } dnsrtt_ctx_t;
@@ -98,8 +99,6 @@ static knotd_state_t ratelimit_apply(knotd_state_t state, knot_pkt_t *pkt,
 	if (knotd_conf_addr_range_match(&ctx->whitelist, qdata->params->remote)) {
 		return state;
 	}	
-
-	// knotd_mod_log(mod, LOG_DEBUG, "Query flags: %d", qdata->params->flags);
 
 	dnsrtt_req_t req = {
 		.wire = pkt->wire,
@@ -172,9 +171,11 @@ int dnsrtt_load(knotd_mod_t *mod)
 	}
 
 	// Create table
-	uint32_t rate = knotd_conf_mod(mod, MOD_RATE_LIMIT).single.integer;
+	uint32_t rate = knotd_conf_mod(mod, MOD_TCP_NEED).single.integer;
 	size_t size = knotd_conf_mod(mod, MOD_TBL_SIZE).single.integer;
-	ctx->dnsrtt = dnsrtt_create(size, rate);
+	uint32_t interval = knotd_conf_mod(mod, MOD_INTERVAL).single.integer;
+
+	ctx->dnsrtt = dnsrtt_create(size, rate, interval);
 	if (ctx->dnsrtt == NULL) {
 		dnsrtt_ctx_free(ctx);
 		return KNOT_ENOMEM;
@@ -187,8 +188,8 @@ int dnsrtt_load(knotd_mod_t *mod)
 	ctx->whitelist = knotd_conf_mod(mod, MOD_WHITELIST);
 
 	knotd_mod_ctx_set(mod, ctx);
-	knotd_mod_log(mod, LOG_DEBUG, "   ========= Loading complete: rate=%lld, table-size=%ld, slip=%ld =========   ", 
-				      ctx->dnsrtt->rate, ctx->dnsrtt->size, ctx->slip);
+	knotd_mod_log(mod, LOG_DEBUG, "   ========= Loading complete: rate=%ld, table-size=%ld, slip=%ld, interval=%ld =========   ", 
+				      ctx->dnsrtt->rate, ctx->dnsrtt->size, ctx->slip, ctx->dnsrtt->interval);
 	return knotd_mod_hook(mod, KNOTD_STAGE_END, ratelimit_apply);
 }
 

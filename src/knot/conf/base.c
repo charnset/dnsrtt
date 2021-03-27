@@ -741,7 +741,6 @@ int conf_import(
 		goto import_error;
 	}
 	// Load purge must be here as conf_parse may be called recursively!
-	conf_mod_load_purge(conf, false);
 
 	// Commit new configuration.
 	ret = conf->api->txn_commit(&txn);
