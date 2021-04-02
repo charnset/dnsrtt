@@ -181,7 +181,7 @@ static int dnsrtt_classify(uint8_t *dst, size_t maxlen, const struct sockaddr_st
 		struct sockaddr_in *ipv4 = (struct sockaddr_in *)remote;
 		memcpy(&netblk, &ipv4->sin_addr, dnsrtt_V4_PREFIX_LEN);
 	}
-	memcpy(dst, &netblk, sizeof(netblk));
+	memcpy(dst + blklen, &netblk, sizeof(netblk));
 	blklen += sizeof(netblk);
 
 	/* Name */
@@ -461,13 +461,14 @@ int dnsrtt_query(dnsrtt_table_t *dnsrtt, int slip, const struct sockaddr_storage
 		bucket->tcbit = 0;
 	}
 
-	if (bucket->netblk == 11596332) {
+/*	for debugging purposes
+	if (bucket->netblk == 2824408324) {
 		char addr_str[SOCKADDR_STRLEN];
 		subnet_tostr(addr_str, sizeof(addr_str), remote);
 		knotd_mod_log(mod, LOG_INFO, "IP %s, pref %lld, ntcp %lld, timestamp %lld", addr_str, 
 						(long long)bucket->netblk, (long long)bucket->ntcp, (long long)bucket->time);
 	}
-
+*/
 	if (req->tcp) {	// TCP queries
 		++bucket->ntcp;
 	} else { // UDP queries

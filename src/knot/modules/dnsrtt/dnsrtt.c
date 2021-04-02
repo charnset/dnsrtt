@@ -190,8 +190,11 @@ int dnsrtt_load(knotd_mod_t *mod)
 	ctx->whitelist = knotd_conf_mod(mod, MOD_WHITELIST);
 
 	knotd_mod_ctx_set(mod, ctx);
-	knotd_mod_log(mod, LOG_INFO, "   ========= Loading complete: rate=%ld, table-size=%ld, slip=%ld, interval=%ld, exp=%d =========   ", 
-				      ctx->dnsrtt->rate, ctx->dnsrtt->size, ctx->slip, ctx->dnsrtt->interval, ctx->dnsrtt->experiment);
+	knotd_mod_log(mod, LOG_INFO, "rate: %ld", ctx->dnsrtt->rate);
+	knotd_mod_log(mod, LOG_INFO, "table-size: %ld", ctx->dnsrtt->size);
+	knotd_mod_log(mod, LOG_INFO, "slip: %ld", ctx->slip);
+	knotd_mod_log(mod, LOG_INFO, "interval: %ld", ctx->dnsrtt->interval);
+	knotd_mod_log(mod, LOG_INFO, "experiment: %ld", ctx->dnsrtt->experiment);
 	return knotd_mod_hook(mod, KNOTD_STAGE_END, ratelimit_apply);
 }
 
