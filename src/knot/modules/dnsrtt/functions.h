@@ -50,14 +50,15 @@ typedef struct {
  */
 
 typedef struct {
-	SIPHASH_KEY key;     	// Siphash key
+	SIPHASH_KEY key;     		// Siphash key
 	uint32_t rate;			// Configured number of needed TCP queries per prefix
-	uint32_t interval;		// interval in seconds	
+	uint32_t interval;		// interval in seconds
+	bool experiment;		// if experiment (1): don't send the actual TC bit
 	pthread_mutex_t ll;	
-	pthread_mutex_t *lk;	// Table locks
+	pthread_mutex_t *lk;		// Table locks
 	unsigned lk_count;		// Table lock count (granularity)
 	size_t size;			// Number of buckets
-	dnsrtt_item_t arr[];	// Buckets
+	dnsrtt_item_t arr[];		// Buckets
 } dnsrtt_table_t;
 
 /*! \brief DNSRTT request flags. */
@@ -84,7 +85,7 @@ typedef struct {
  * \param interval (in secs).
  * \return created table or NULL.
  */
-dnsrtt_table_t *dnsrtt_create(size_t size, uint32_t rate, uint32_t interval);
+dnsrtt_table_t *dnsrtt_create(size_t size, uint32_t rate, uint32_t interval, bool exp);
 
 /*!
  * \brief Query the DNSRTT table for accept or deny, when the rate limit is reached.
@@ -93,7 +94,7 @@ dnsrtt_table_t *dnsrtt_create(size_t size, uint32_t rate, uint32_t interval);
  * \param slip DNSRTT slip.
  * \param remote Source address.
  * \param req DNSRTT request (containing resp., flags and question).
- • \param zone Zone name related to the response (or NULL).
+ * \param zone Zone name related to the response (or NULL).
  * \param mod Query module (needed for logging).
  * \retval KNOT_EOK when did not send back TC bit.
  * \retval KNOT_ELIMIT when sended back TC bit.

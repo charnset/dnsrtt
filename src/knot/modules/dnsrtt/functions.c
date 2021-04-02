@@ -172,7 +172,7 @@ static int dnsrtt_classify(uint8_t *dst, size_t maxlen, const struct sockaddr_st
 	*dst = cls;
 	int blklen = sizeof(cls);
 
-	/* Address (in network byteorder, adjust masks). */
+	/* Address (in network byteorder, adjust masks) */
 	uint64_t netblk = 0;
 	if (remote->ss_family == AF_INET6) {
 		struct sockaddr_in6 *ipv6 = (struct sockaddr_in6 *)remote;
@@ -181,7 +181,7 @@ static int dnsrtt_classify(uint8_t *dst, size_t maxlen, const struct sockaddr_st
 		struct sockaddr_in *ipv4 = (struct sockaddr_in *)remote;
 		memcpy(&netblk, &ipv4->sin_addr, dnsrtt_V4_PREFIX_LEN);
 	}
-	memcpy(dst + blklen, &netblk, sizeof(netblk));
+	memcpy(dst, &netblk, sizeof(netblk));
 	blklen += sizeof(netblk);
 
 	/* Name */
@@ -337,7 +337,7 @@ static int dnsrtt_setlocks(dnsrtt_table_t *tbl, uint32_t granularity)
 	return KNOT_EOK;
 }
 
-dnsrtt_table_t *dnsrtt_create(size_t size, uint32_t rate, uint32_t interval)
+dnsrtt_table_t *dnsrtt_create(size_t size, uint32_t rate, uint32_t interval, bool exp)
 {
 	if (size == 0) {
 		return NULL;
@@ -351,6 +351,7 @@ dnsrtt_table_t *dnsrtt_create(size_t size, uint32_t rate, uint32_t interval)
 	tbl->size = size;
 	tbl->rate = rate;
 	tbl->interval = interval;
+	tbl->experiment = exp;
 
 	if (dnssec_random_buffer((uint8_t *)&tbl->key, sizeof(tbl->key)) != DNSSEC_EOK) {
 		free(tbl);
@@ -384,7 +385,7 @@ static dnsrtt_item_t *dnsrtt_hash(dnsrtt_table_t *tbl, const struct sockaddr_sto
 	/* Find an exact match in <id, id + HOP_LEN). */
 	knot_dname_t *qname = buf + sizeof(uint8_t) + sizeof(uint64_t);
 	uint64_t netblk;
-	memcpy(&netblk, buf + sizeof(uint8_t), sizeof(netblk));
+	memcpy(&netblk, buf, sizeof(netblk));
 	dnsrtt_item_t match = {
 		.hop = 0,
 		.netblk = netblk,
@@ -418,14 +419,17 @@ static dnsrtt_item_t *dnsrtt_hash(dnsrtt_table_t *tbl, const struct sockaddr_sto
 
 	/* Inspect bucket state. */
 	unsigned hop = bucket->hop;
-	if (bucket->cls == CLS_NULL) {
+	if (bucket->ntcp == 0) {
 		memcpy(bucket, &match, sizeof(dnsrtt_item_t));
 		bucket->hop = hop;
 	}
 
 	/* Check for collisions. */
 	if (!bucket_match(bucket, &match)) {
-		return NULL;
+		if (bucket->ntcp == tbl->rate) {
+			memcpy(bucket, &match, sizeof(dnsrtt_item_t));
+			bucket->hop = hop;
+		}
 	}		
 
 	return bucket;
@@ -444,23 +448,24 @@ int dnsrtt_query(dnsrtt_table_t *dnsrtt, int slip, const struct sockaddr_storage
 	uint32_t now = time_now().tv_sec;
 	dnsrtt_item_t *bucket = dnsrtt_hash(dnsrtt, remote, req, zone, now, &lock);
 	if (!bucket) {
-		knotd_mod_log(mod, LOG_NOTICE, "ERROR: hash collision or the table is full");
 		if (lock > -1) {
 			dnsrtt_unlock(dnsrtt, lock);
 		}
 		return KNOT_ERROR;
 	}
 
-	char addr_str[SOCKADDR_STRLEN];
-	subnet_tostr(addr_str, sizeof(addr_str), remote);
-	knotd_mod_log(mod, LOG_DEBUG, "IP %s, pref %lld, ntcp %lld, timestamp %lld", addr_str, 
-					(long long)bucket->netblk, (long long)bucket->ntcp, (long long)bucket->time);
-
 	/* Check if bucket expired (time + interval < now) */
 	if (bucket->time + dnsrtt->interval < now) {
 		bucket->ntcp = 0;
 		bucket->time = now;
 		bucket->tcbit = 0;
+	}
+
+	if (bucket->netblk == 11596332) {
+		char addr_str[SOCKADDR_STRLEN];
+		subnet_tostr(addr_str, sizeof(addr_str), remote);
+		knotd_mod_log(mod, LOG_INFO, "IP %s, pref %lld, ntcp %lld, timestamp %lld", addr_str, 
+						(long long)bucket->netblk, (long long)bucket->ntcp, (long long)bucket->time);
 	}
 
 	if (req->tcp) {	// TCP queries
@@ -475,14 +480,13 @@ int dnsrtt_query(dnsrtt_table_t *dnsrtt, int slip, const struct sockaddr_storage
 			/* production: slip => increase tcbit counter => send back tcbit */
 			/* experiment: slip => increase tcbit counter & tcp counter (don't actually send back tcbit but keep counting */
 			if (dnsrtt_slip_roll(slip)) {	// (1 / slip) percent of unfortunate query
-			/*	production
-				++bucket->tcbit;
-			 	ret = KNOT_ELIMIT;
-			*/
-			
-			//	experiment
-				++bucket->tcbit;
-				++bucket->ntcp;
+				if (dnsrtt->experiment) { // experiment 
+					++bucket->tcbit;
+					++bucket->ntcp;
+				} else { // production: send the actual TC bit
+					++bucket->tcbit;
+					ret = KNOT_ELIMIT;
+				}
 			}
 		} else if (bucket->ntcp < 0) {
 			ret = KNOT_ERROR;

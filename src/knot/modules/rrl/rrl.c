@@ -157,6 +157,7 @@ static void ctx_free(rrl_ctx_t *ctx)
 
 int rrl_load(knotd_mod_t *mod)
 {
+	// knotd_mod_log(mod, LOG_INFO, "please show");
 	// Create RRL context.
 	rrl_ctx_t *ctx = calloc(1, sizeof(rrl_ctx_t));
 	if (ctx == NULL) {
