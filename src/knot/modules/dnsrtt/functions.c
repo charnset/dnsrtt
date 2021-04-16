@@ -14,6 +14,12 @@
     along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 
+/*
+ * DNSRTT is implemented by Pithayuth Charnsethikul (USC/ISI)
+ * and is derived frome Module rrl (/knot/modules/rrl/)
+ *
+ */
+
 #include <assert.h>
 #include <time.h>
 
@@ -460,9 +466,9 @@ int dnsrtt_query(dnsrtt_table_t *dnsrtt, int slip, const struct sockaddr_storage
 		bucket->time = now;
 		bucket->tcbit = 0;
 	}
-
-/*	for debugging purposes
-	if (bucket->netblk == 2824408324) {
+/*
+	//for debugging purposes
+	if (bucket->netblk == 123456789) {
 		char addr_str[SOCKADDR_STRLEN];
 		subnet_tostr(addr_str, sizeof(addr_str), remote);
 		knotd_mod_log(mod, LOG_INFO, "IP %s, pref %lld, ntcp %lld, timestamp %lld", addr_str, 

@@ -14,6 +14,12 @@
     along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 
+/*
+ * DNSRTT is implemented by Pithayuth Charnsethikul (USC/ISI)
+ * and is derived frome Module rrl (/knot/modules/rrl/)
+ *
+ */
+
 #pragma once
 
 #include <stdint.h>
